@@ -1,10 +1,13 @@
-package com.nosto.exchange.currencyconvert.provider;
+package com.nosto.exchange.currencyconvert.provider.apilayer;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nosto.exchange.currencyconvert.exception.ExchangeServiceException;
 import com.nosto.exchange.currencyconvert.model.apilayer.APILayerListResponse;
 import com.nosto.exchange.currencyconvert.model.apilayer.APILayerSymbolsResponse;
+import com.nosto.exchange.currencyconvert.provider.ExchangeRateProvider;
+import com.nosto.exchange.currencyconvert.provider.apilayer.cache.APILayerRatesCache;
+import com.nosto.exchange.currencyconvert.provider.apilayer.cache.APILayerSymbolsCache;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -48,6 +51,12 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
     @Value(("${api.layer.access.key}"))
     private String apiAccessKey;
 
+    @Value(("${api.layer.symbols.cache.expiry.millis}"))
+    private long symbolsCacheExpiryMillis;
+
+    @Value(("${api.layer.rates.cache.expiry.millis}"))
+    private long ratesCacheExpiryMillis;
+
     private HttpClient apiLayerClient;
 
     private HttpRequest symbolsRequest;
@@ -58,10 +67,17 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
 
     private ObjectMapper objectMapper;
 
+    private APILayerSymbolsCache symbolsCache;
+    private APILayerRatesCache ratesCache;
+
     @PostConstruct
     public void init() throws MalformedURLException, URISyntaxException {
+
         apiLayerClient = HttpClient.newHttpClient();
         objectMapper = new ObjectMapper();
+
+        symbolsCache = new APILayerSymbolsCache(symbolsCacheExpiryMillis);
+        ratesCache = new APILayerRatesCache(ratesCacheExpiryMillis);
 
         URL baseURL = new URL(this.baseURL);
         String accessKeyParameter = "?" + ACCESS_KEY_PARAM + "=" + apiAccessKey;
@@ -88,18 +104,29 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
     @Override
     public Map<String, String> listSupportedCurrencies() throws ExchangeServiceException {
 
+        Map<String, String> cachedSymbols = symbolsCache.getSupportedSymbols();
+
+        if (cachedSymbols != null) {
+            return cachedSymbols;
+        }
+
         CompletableFuture<String> response = apiLayerClient.sendAsync(symbolsRequest,
                         HttpResponse.BodyHandlers.ofString()).thenApply(HttpResponse::body);
 
         try {
 
+            // TODO: Responses from two endpoints are different, need to investigate
             APILayerSymbolsResponse symbolsResponse = objectMapper.readValue(response.get(), APILayerSymbolsResponse.class);
 
             if (!symbolsResponse.success()) {
                 throw new ExchangeServiceException("Failed to retrieve exchange rates from APILayer");
             }
 
-            return symbolsResponse.symbols();
+            Map<String, String> symbols = symbolsResponse.symbols();
+
+            symbolsCache.putSymbolsToCache(symbols);
+
+            return symbols;
 
         } catch (InterruptedException | ExecutionException e) {
             throw new ExchangeServiceException("Failed to list exchange rates.", e);
