@@ -2,6 +2,9 @@ package com.nosto.exchange.currencyconvert.model;
 
 import java.util.Date;
 
+/**
+ * Base API response for all requests.
+ */
 public class ExchangeRateBaseResponse {
 
     private boolean success;

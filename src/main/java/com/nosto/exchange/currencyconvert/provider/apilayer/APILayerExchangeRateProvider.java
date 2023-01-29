@@ -1,8 +1,8 @@
 package com.nosto.exchange.currencyconvert.provider.apilayer;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nosto.exchange.currencyconvert.exception.ExchangeServiceException;
+import com.nosto.exchange.currencyconvert.model.apilayer.APILayerConvertResponse;
 import com.nosto.exchange.currencyconvert.model.apilayer.APILayerListResponse;
 import com.nosto.exchange.currencyconvert.model.apilayer.APILayerSymbolsResponse;
 import com.nosto.exchange.currencyconvert.provider.ExchangeRateProvider;
@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.MalformedURLException;
 import java.net.URISyntaxException;
@@ -23,15 +24,14 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 
 /**
- * Utilizes the data from https://exchangeratesapi.io/, an APILayer company, to calculate the exchange rate.
+ * Utilizes the data from <a href="https://apilayer.com/">APILayer</a> to calculate the exchange rate.
  */
 @Component
 public class APILayerExchangeRateProvider implements ExchangeRateProvider {
 
-    private static final String ACCESS_KEY_PARAM = "access_key";
+    private static final String API_KEY_HEADER_NAME = "apikey";
 
     @Value("${http.client.timeout.seconds}")
     private long httpClientTimeoutSeconds;
@@ -59,16 +59,16 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
 
     private HttpClient apiLayerClient;
 
-    private HttpRequest symbolsRequest;
-
-    private HttpRequest listRequest;
-
-    private HttpRequest convertRequest;
-
     private ObjectMapper objectMapper;
 
     private APILayerSymbolsCache symbolsCache;
     private APILayerRatesCache ratesCache;
+
+    private URL baseURLContext;
+
+    private static final String PARAM_SEPARATOR = "&";
+    private static final String PARAM_VALUE_SEPARATOR = "=";
+    private static final String QUERY_PARAM_START = "?";
 
     @PostConstruct
     public void init() throws MalformedURLException, URISyntaxException {
@@ -79,28 +79,34 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
         symbolsCache = new APILayerSymbolsCache(symbolsCacheExpiryMillis);
         ratesCache = new APILayerRatesCache(ratesCacheExpiryMillis);
 
-        URL baseURL = new URL(this.baseURL);
-        String accessKeyParameter = "?" + ACCESS_KEY_PARAM + "=" + apiAccessKey;
-
-        URL listURL = new URL(baseURL, listResourcePath + accessKeyParameter);
-        URL symbolsURL = new URL(baseURL, symbolsResourcePath + accessKeyParameter);
-        URL convertURL = new URL(baseURL, convertResourcePath + accessKeyParameter);
-
-        symbolsRequest = buildRequest(symbolsURL);
-        listRequest = buildRequest(listURL);
-        convertRequest = buildRequest(convertURL);
+        baseURLContext = new URL(this.baseURL);
 
     }
 
+    /**
+     * Builds an HttpRequest initialized with auth headers and timeouts.
+     *
+     * @param url The request URL
+     * @return An HttpRequest
+     * @throws URISyntaxException
+     */
     private HttpRequest buildRequest(URL url) throws URISyntaxException {
         return HttpRequest.newBuilder()
                 .uri(url.toURI())
                 .timeout(Duration.ofSeconds(httpClientTimeoutSeconds))
                 .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
+                .headers(API_KEY_HEADER_NAME, apiAccessKey)
                 .GET()
                 .build();
     }
 
+    /**
+     * List supported currencies by APILayer.
+     * This utilizes a separate cache. It is recommended to keep this cache for a longer time eg:- One day.
+     *
+     * @return List of supported currencies Map<ISO 4217 Currency Code, Currency Name>
+     * @throws ExchangeServiceException
+     */
     @Override
     public Map<String, String> listSupportedCurrencies() throws ExchangeServiceException {
 
@@ -110,28 +116,31 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
             return cachedSymbols;
         }
 
-        CompletableFuture<String> response = apiLayerClient.sendAsync(symbolsRequest,
-                        HttpResponse.BodyHandlers.ofString()).thenApply(HttpResponse::body);
-
         try {
 
-            // TODO: Responses from two endpoints are different, need to investigate
-            APILayerSymbolsResponse symbolsResponse = objectMapper.readValue(response.get(), APILayerSymbolsResponse.class);
+            URL listURL = new URL(baseURLContext, symbolsResourcePath);
+
+            HttpResponse<String> response = apiLayerClient.send(buildRequest(listURL), HttpResponse.BodyHandlers.ofString());
+
+            APILayerSymbolsResponse symbolsResponse = objectMapper.readValue(response.body(),
+                    APILayerSymbolsResponse.class);
 
             if (!symbolsResponse.success()) {
-                throw new ExchangeServiceException("Failed to retrieve exchange rates from APILayer");
+                throw new ExchangeServiceException("Failed to list supported currencies. " +
+                        "APILayer returned an error response : " + response.body());
             }
 
             Map<String, String> symbols = symbolsResponse.symbols();
 
-            symbolsCache.putSymbolsToCache(symbols);
+            CompletableFuture.runAsync(() ->
+                symbolsCache.putSymbolsToCache(symbols)
+
+            );
 
             return symbols;
 
-        } catch (InterruptedException | ExecutionException e) {
+        } catch (IOException | InterruptedException | URISyntaxException e) {
             throw new ExchangeServiceException("Failed to list exchange rates.", e);
-        } catch (JsonProcessingException e) {
-            throw new ExchangeServiceException("Failed to parse APILayer response for list request", e);
         }
     }
 
@@ -142,35 +151,87 @@ public class APILayerExchangeRateProvider implements ExchangeRateProvider {
      * probability of the one of those changing in the next second is very high which would make the resources we
      * expend to cache this an expense that is not used.
      *
-     * @param baseCurrency
-     * @return
+     * @param baseCurrency ISO 4217 currency code
+     * @return List of exchange rates against the base currency
      * @throws ExchangeServiceException
      */
     @Override
     public Map<String, Float> listExchangeRates(String baseCurrency) throws ExchangeServiceException {
 
-        CompletableFuture<String> response = apiLayerClient.sendAsync(listRequest, HttpResponse.BodyHandlers.ofString())
-                .thenApply(HttpResponse::body);
-
         try {
 
-            APILayerListResponse listResponse = objectMapper.readValue(response.get(), APILayerListResponse.class);
+            URL listURL = new URL(baseURLContext, (new StringBuilder(listResourcePath))
+                    .append(QUERY_PARAM_START)
+                    .append("base").append(PARAM_VALUE_SEPARATOR).append(baseCurrency)
+                    .toString());
+
+            HttpResponse<String> response = apiLayerClient.send(buildRequest(listURL), HttpResponse.BodyHandlers.ofString());
+
+            APILayerListResponse listResponse = objectMapper.readValue(response.body(), APILayerListResponse.class);
 
             if (!listResponse.success()) {
-                throw new ExchangeServiceException("Failed to retrieve exchange rates from APILayer");
+                throw new ExchangeServiceException("Failed to retrieve exchange rates." +
+                        " APILayer returned an error response : " + response.body());
             }
 
             return listResponse.rates();
 
-        } catch (InterruptedException | ExecutionException e) {
+        } catch (IOException | InterruptedException | URISyntaxException e) {
             throw new ExchangeServiceException("Failed to list exchange rates.", e);
-        } catch (JsonProcessingException e) {
-            throw new ExchangeServiceException("Failed to parse APILayer response for list request", e);
         }
     }
 
+    /**
+     * Convert an amount from one currency to another by calling the APILayer.
+     * If the same two has been converted recently, uses the rate received in the earlier request to do the conversion.
+     *
+     * @param baseCurrency ISO 4217 base currency code
+     * @param targetCurrency ISO 4217 target currency code
+     * @param value Value to convert
+     * @return The value in target currency
+     * @throws ExchangeServiceException
+     */
     @Override
-    public BigDecimal convertCurrency(String baseCurrency, String targetCurrency, BigDecimal value) {
-        return null;
+    public BigDecimal convertCurrency(String baseCurrency, String targetCurrency, BigDecimal value)
+            throws ExchangeServiceException {
+
+        BigDecimal cachedRate = ratesCache.getCachedRate(baseCurrency, targetCurrency);
+
+        if (cachedRate != null) {
+            return cachedRate.multiply(value);
+        }
+
+        try {
+
+            URL listURL = new URL(baseURLContext, (new StringBuilder(convertResourcePath))
+                    .append(QUERY_PARAM_START)
+                    .append("from").append(PARAM_VALUE_SEPARATOR).append(baseCurrency)
+                    .append(PARAM_SEPARATOR).append("to").append(PARAM_VALUE_SEPARATOR).append(targetCurrency)
+                    .append(PARAM_SEPARATOR).append("amount").append(PARAM_VALUE_SEPARATOR).append(value)
+                    .toString());
+
+            HttpResponse<String> response = apiLayerClient.send(buildRequest(listURL),
+                    HttpResponse.BodyHandlers.ofString());
+
+            APILayerConvertResponse convertResponse = objectMapper.readValue(response.body(),
+                    APILayerConvertResponse.class);
+
+            if (!convertResponse.success()) {
+                throw new ExchangeServiceException("Failed to convert rates! APILayer returned a failure response : " +
+                        response.body());
+            }
+
+            BigDecimal rate = convertResponse.result();
+
+            CompletableFuture.runAsync(() ->
+                ratesCache.putRateToCache(baseCurrency, targetCurrency, convertResponse.info().rate())
+            );
+
+
+            return rate;
+
+        } catch (IOException | InterruptedException | URISyntaxException e) {
+            throw new ExchangeServiceException("Failed to list exchange rates.", e);
+        }
     }
 }

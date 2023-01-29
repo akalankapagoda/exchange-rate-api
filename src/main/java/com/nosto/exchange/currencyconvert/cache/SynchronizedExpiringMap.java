@@ -4,7 +4,6 @@ import org.apache.commons.collections4.map.PassiveExpiringMap;
 
 import java.util.Collections;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
 
 /**
  * A thread safe cache built on Apache Commons PassiveExpiringMap.
@@ -13,7 +12,7 @@ import java.util.concurrent.ExecutionException;
  */
 public class SynchronizedExpiringMap<T> {
 
-    private Map<String, T> cache;
+    private final Map<String, T> cache;
 
     /**
      * Initialise PassiveExpiringMap wrapping it with a Synchronized map.
@@ -22,7 +21,7 @@ public class SynchronizedExpiringMap<T> {
      */
     public SynchronizedExpiringMap(long expiryDurationMilliseconds) {
         cache = Collections.synchronizedMap(
-                new PassiveExpiringMap<String, T>(expiryDurationMilliseconds));
+                new PassiveExpiringMap<>(expiryDurationMilliseconds));
     }
 
     /**

@@ -1,8 +1,10 @@
 package com.nosto.exchange.currencyconvert.model;
 
-import java.util.Date;
 import java.util.Map;
 
+/**
+ * API response for list request.
+ */
 public class ExchangeRateListResponse extends ExchangeRateBaseResponse {
 
     private String base;

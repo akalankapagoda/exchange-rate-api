@@ -3,6 +3,9 @@ package com.nosto.exchange.currencyconvert.exception;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.ResponseStatus;
 
+/**
+ * An internal server error occurred during operation.
+ */
 @ResponseStatus(value = HttpStatus.INTERNAL_SERVER_ERROR)
 public class ExchangeServiceException extends Exception {
 
