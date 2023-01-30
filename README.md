@@ -28,7 +28,6 @@ Navigate to the project root directory and run the following command.
 
 This provides a Swagger UI and OpenAPI implementation for documentation.
 
-Please see here for the deployed documentation.
-
+Please see [here](https://aka-exchange-rate-api.herokuapp.com/api/swagger-ui/index.html) for the deployed documentation.
 
 
